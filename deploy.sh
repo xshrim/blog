@@ -1,5 +1,7 @@
 #!/bin/sh
 
+# https://www.waynerv.com/posts/setup-blog-with-hugo-and-github-pages/
+
 # 任一步骤执行失败都会终止整个部署过程
 set -e
 
