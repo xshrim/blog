@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>云昊平台Wiki-Prometheus中文文档</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+    <meta name="description" content="Description" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
+    />
+    <link rel="stylesheet" href="/assets/lib/vue.css" />
+    <link rel="stylesheet" href="/assets/lib/style.css" />
+  </head>
+  <body>
+
+    <div id="app"></div>
+    <script>
+        window.$docsify = {
+          name: "Prometheus中文文档", //文档名
+          homepage: "/introductions/Overview.md",
+          subMaxLevel: 6,
+
+          // loadSidebar: 'posts/GUIDE.md',
+
+          loadNavbar: './README.md',
+          
+          auto2top: true,
+          // disqus: 'shortname',
+          // 完整配置参数
+          remoteMarkdown: {
+            tag: 'remoteMarkdownUrl',
+          },
+//           topBanner: {
+//             options
+//           },
+          search: {
+            maxAge: 86400000, // 过期时间，单位毫秒，默认一天
+            placeholder: "搜索",
+            noData: "没有结果",
+            // 搜索标题的最大程级, 1 - 6
+            depth: 6
+          },
+          pagination: {
+            previousText: '上一章节',
+            nextText: '下一章节',
+            crossChapter: true,
+            crossChapterText: true,
+          },
+          tabs: {
+            persist    : true,      // default
+            sync       : true,      // default
+            theme      : 'classic', // default
+            tabComments: true,      // default
+            tabHeadings: true       // default
+          },
+          count:{
+            countable: true,
+            position: 'top',
+            margin: '10px',
+            float: 'right',
+            fontsize:'0.9em',
+            color:'rgb(90,90,90)',
+            language:'chinese',
+            localization: {
+            words: "",
+            minute: ""
+            },
+            isExpected: true
+        },
+      };
+
+      </script>
+      <script src="/assets/lib/docsify.min.js"></script>
+      <script src="/assets/lib/search.js"></script>
+      <script src="/assets/lib/zoom-image.js"></script>
+      <script src="/assets/lib/docsify-pagination.min.js"></script>
+      <script src="/assets/lib/docsify-remote-markdown.min.js"></script>
+      <script src="/assets/lib/countable.min.js"></script>
+      <script src="/assets/lib/docsify-copy-code"></script>
+      <script src="/assets/lib/docsify-tabs@1"></script>
+      <script src="/assets/lib/index.js"></script>
+      <script src="/assets/lib/emoji.js"></script>
+      <script src="/assets/lib/prism-bash.js"></script>
+      <script src="/assets/lib/prism-go.js"></script>
+      <script src="/assets/lib/prism-java.js"></script>
+      <script src="/assets/lib/prism-javascript.js"></script>
+      <script src="/assets/lib/prism-python.js"></script>
+      <script src="/assets/lib/prism-yaml.js"></script>
+      <script src="/assets/lib/prism-docker.js"></script>
+      <script src="/assets/lib/prism-json.js"></script>
+<!--      <script src="/assets/lib/disqus.min.js"></script>-->
+    </body>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+Description = "Weclome to xshrim's blog site that who is best on kubernetes, cloud native and program develop."
+Keywords =  "Blog, Kubernetes, cloud native, Golang"
+Subtitle = "Don't stop running forward!"
+AuthorImg = "/img/avatar.png"
+AuthorName = "xshrim"
+Introduce = "Never forget your dreams！"
+DateFormat = "2006/01/02"
+YearFormat = "2006Y"
+MonthFormat = "01/02"
+
+[Footer]
+  StorageLink = "https://github.com/"
+  StorageName = "Github Page"
+  ICPLink = ""
+  ICPNo = "-"
+
+[[Socials]]
+  Name = "GitHub"
+  Icon = "github"
+  URL = "https://github.com/xshrim/"
+
+[[Socials]]
+  Name = "ZhiHu"
+  Icon = "globe"
+  URL = "https://www.zhihu.com/people/xshrim-54"
+
+[[Links]]
+  Name = "LiaoXueFeng"
+  Permalink = "https://www.liaoxuefeng.com/"

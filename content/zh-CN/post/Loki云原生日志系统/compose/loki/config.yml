@@ -1,0 +1,64 @@
+auth_enabled: false # 不启用认证
+
+server:
+  http_listen_port: 3100 # 服务监听端口
+
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring: # 单进程模式下ingester的hash ring存储在内存中
+      kvstore:
+        store: inmemory # hash ring支持的存储类型有consul, etcd, inmemory, memberlist
+      replication_factor: 1 # ingester副本数
+    final_sleep: 0s # ingester退出前sleep的时间(保证metric被抓取)
+  chunk_idle_period: 1h # 已满的chunk保存在内存中的时长(热数据)
+  max_chunk_age: 1h # 所有chunk落盘(flush)前的存活时长
+  chunk_target_size: 1048576 # chunk达到存活时长或目标大小后会进行落盘, 1.5MB的chunk大约相当于7-10MB的原始日志量
+  chunk_retain_period: 30s # chunk落盘后在内存中的存活时长(相当于chunk缓存),如启用index缓存, 则必须大于index缓存(index缓存默认5m)
+  max_transfer_retries: 0 # chunk落盘失败的重试次数(0表示不重试)
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  boltdb_shipper:
+    active_index_directory: /tmp/loki/boltdb-shipper-active
+    cache_location: /tmp/loki/boltdb-shipper-cache
+    cache_ttl: 24h # Can be increased for faster performance over longer query periods, uses more disk space
+    shared_store: filesystem
+  filesystem:
+    directory: /tmp/loki/chunks
+
+compactor:
+  working_directory: /tmp/loki/boltdb-shipper-compactor
+  shared_store: filesystem
+
+limits_config:
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+chunk_store_config:
+  max_look_back_period: 0s
+
+table_manager:
+  retention_deletes_enabled: false
+  retention_period: 0s
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /tmp/loki/rules
+  rule_path: /tmp/loki/rules-temp
+  alertmanager_url: http://localhost:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
