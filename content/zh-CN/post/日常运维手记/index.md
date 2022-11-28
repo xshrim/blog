@@ -3707,6 +3707,212 @@ server.3=slave02:2888:3888
 
 ### Redis
 
+**基于内存的KV数据库**
+
+#### 基本概念
+
+- **KV数据库**: KV数据库即Key-Value数据库(键值数据库)，与关系数据库不同，它使用简单的键值方法来存储数据。键值数据库将数据存储为键值对集合，其中键作为唯一标识符。键和值都可以是从简单对象到复杂复合对象的任何内容。键值数据库是高度可分区的，并且允许以其他类型的数据库无法实现的规模进行水平扩展。
+- **数据库**: Redis是一个Key-Value存储系统，其数据库的概念与MySQL等数据库不大一样，Redis中的数据库更像是一个命名空间，Redis默认支持16个数据库(可修改），库名以db0，db1，...，db15命名且不可修改，如不指定则默认使用db0数据库。不同的库中的数据是相互独立的，但所有库都共用一套访问密码。Redis集群模式仅支持db0数据库。
+- **实例**: Redis分为服务端redis-server和客户端redis-cli，其中客户端为命令行工具，用于连接服务端，服务端则是Redis的核心。一个运行的Redis服务端进程就是一个实例(或称为一个节点)，每个实例支持多个数据库。
+- **集群**: Redis支持多种集群方式，多个Redis实例可以组成集群，集群是为了解决Redis的高可用、故障转移和高性能等需求的。集群方式不同则Redis实例的角色也不一样，实例可能作为另一个实例的副本，也可能作为其他实例的一个分片。
+- **副本**: Redis通过副本机制实现高可用，多个Redis实例之间形成主从关系，由master实例向slave实例同步数据实现数据的多副本和一致性
+- **分区/分片**: 分区即是分片，Redis通过分区/分片（partiton/shard）机制实现扩展能力和性能的提升，每一个Redis分片就是一个Redis实例，Redis分片就是把数据分割到多个 Redis 实例的处理过程，因此每个 Redis 实例只保存 key 的一个子集，Redis支持范围法分片和哈希法分片。
+- **哨兵**: Redis实例可以以哨兵(Sentinel)模式运行，哨兵实例不存储数据，而是监控主从实例是否正常运行，并自主实例出现故障时自动将从实例切换为主实例，保证集群的可用性。哨兵机制实现了Redis集群的自动故障转移。
+- **Cluster**: Redis支持3种集群方式，其中主从同步集群实现多副本高可用，哨兵模式支持自动故障转移，但对于海量数据和高性能的场景，则需要利用分片技术，而Redis Cluster则是基于分片技术的集群模式。
+- **gossip**: gossip又称流言协议，是一种实现分布式系统内消息扩散的通信协议，分布式系统中的各节点以广播的方式将消息扩散到其他节点，实现系统中各节点数据的最终一致性。Redis Cluster集群中使用此协议实现各分片的数据交换和消息通信。
+- **一致性哈希**: 实现分片时，一般通过哈希法将key哈希后对分片数量取模从而决定该key的数据映射到哪个实例上，但直接进行哈希映射会出现一旦分片发生增减时，分片数量发生变化，所有的映射都将失效。而一致性哈希算法则对2^32取模，值范围被抽象为圆环，并将所有分片映射到圆环上特定的点上，一旦key被映射到某个点，则顺时针寻找其后的第一个分片，从而完成到分片的映射且当ff怕数量变化时也不会影响其他分片上key的映射，此外为了保证key的均匀分布，一般还会引入虚拟节点机制。
+- **哈希槽**: Redis的Cluster进行哈希映射时，选择了类似一致性哈希的哈希槽算法，该算法对2^14取模，形成16384个哈希槽，这些槽分配到不同的分片上，每个分片上都维护完整的哈希槽映射信息，当出现分片增减时，哈希槽位将进行重新分片(reshard)，将槽位和对应的数据转移到其他分片上。哈希槽相比一致性哈希，算法更加简单，维护更加灵活。
+- **主观下线/客观下线**: Redis Sentinel集群的Sentinel节点之间或Sentinel节点到主从节点之间会发送心跳消息以确认节点是否存活，Cluster集群主分片节点间同样会发送心跳消息(PING -> PONG)，如果某个节点在规定的时间内未收到某个节点返回的心跳消息，则会认为该节点主观下线。如果quorum个哨兵或主分片节点(半数+1)均将某个节点标记为主观下线，则该节点被判定为客观下线。主观下线适用于主从节点，但客观下线仅适用于主节点，因为从节点下线不对集群本身状态产生影响，但主节点的下线将导致主节点的重新选举。
+- **持久化**:Redis是基于内存的数据库，所有的数据均存在于内存中，但由于内存具有易失性，因此Redis提供了RDB和AOF两种持久化机制将内存数据持久化到磁盘中。
+- **RDB**: RDB是一种Redis持久化机制，可理解为某个时刻的Redis内存中的数据快照，通过加载RDB文件中的内容实现内存数据的恢复。
+- **AOF**: AOF是一种Redis持久化机制，AOF文件中保存的是所有记录了所有修改内存数据的指令的集合，通过回放AOF文件中的指令实现内存数据的恢复。
+- **数据类型**: Redis作为Key-Value数据库，其Key仅支持字符串一种类型，但Value支持多种类型，基础的Value类型有String、List、Hash、Set和ZSet，此外还有一些不常用的Bitmap、HyperLogLog、GEO、Stream的数据类型。各种数据类型均有其合适的应用场景。Redis中String类型的概念包括integer、float和string。
+
+#### 架构特性
+
+1. 集群架构
+
+   - 主从同步
+
+     Redis主从同步集群中将Redis节点划分为master和slave节点，形成一主多从，slave对外提供读操作，而master负责写操作，形成一个读写分离的架构。master节点会主动向slave节点同步数据，同步过程分为同步和命令传播两个步骤：
+
+     1. slave节点向master节点发送sync命令
+     2. master收到sync命令之后会执行bgsave命令，Redis会fork出一个子进程在后台生成RDB文件，同时将同步过程中的写命令记录到缓冲区中
+     3. 文件生成后，master会把RDB文件发送给slave，从服务器接收到RDB文件会将其载入内存
+     4. 然后master将记录在缓冲区的所有写命令发送给slave，slave对这些命令进行重放，将其数据库的状态更新至和master一致
+
+     Redis2.8版本之后，使用psync命令代替了sync命令，实现通过主从双方共同维护的offset完成主从之间数据的增量同步。
+
+     主从同步模式实现了高可用和读写分离，但当主节点故障后，无法自动产生新的主节点，集群需要人工干预才能重新提供服务。
+
+     ![redis-replica](redis-replica.jpg)
+
+   - Sentinel
+
+     Redis哨兵集群是在主从同步集群的基础上，额外分配哨兵节点，由哨兵节点监控主从集群中各节点的状态，并在主节点故障后自动从从节点中选举新的主节点，此外，哨兵节点还负责向管理员或其他应用报告集群状态，以及给客户端提供最新的master地址。
+
+     哨兵节点之间本身也组成一个分布式集群，用于进行集群决策，如决定新的主节点等，哨兵执行故障转移需要大部分哨兵节点同意才行，哨兵节点会利用Redis的发布订阅机制自动发现主从集群中的其他节点和其他哨兵节点。哨兵节点发现主从同步集群的主节点下线后，会询问其他哨兵节点，当大部分哨兵节点都将主节点标记为下线后，主节点客观下线，哨兵节点之间通过选举算法选出leader哨兵，执行故障转移操作，产生新的主节点。
+
+     1. 启动并初始化Sentinel节点，并获取主从节点信息
+     2. Sentinel节点向主从节点发送消息并接收来自主从节点的频道信息
+     3. Sentinel节点检测主观下线和客观下线状态
+     4. 选举Leader Sentinel节点执行故障转移
+     5. 执行故障转移，在已下线的主节点的下属从节点中选举一个作为新的主节点，将所有从节点改为复制新主节点，将已下线主节点设置为新主节点的从节点
+
+     哨兵模式在主从同步的基础上，解决了自动故障转移的问题，但哨兵节点本身不能保存数据，且存在主节点单点写入和节点扩容困难的问题，难以应对海量数据Redis集群的需求。
+
+     ![redis-sentinel](redis-sentinel.jpg)
+
+   - Cluster
+
+     Cluster集群模式是一个多主集群，多个主节点维护不同分片的数据，构成一个分布式集群，由于每个主节点都只维护集群中的部分数据，因此为了应对主节点故障，每个主节点都至少需要挂载一个从节点，作为主节点的数据备份，主节点故障时会被提升为新的主节点。但集群中的读写操作均在主节点上完成。
+
+     Cluster集群中主节点之间通过gossip协议实现消息通信和数据交换，采用类似与哨兵模式的方式实现自动故障转移，客户端连接集群中任意主节点即可，无需中间代理层。
+
+     Cluster集群采用哈希槽算法进行数据分片，增减节点需要对哈希槽进行重分配。
+
+     Cluster集群模式同时满足高可用，读写分离，故障转移和横向扩展等需求，是比较理想的集群模式，但不支持多数据库。
+
+     ![redis-cluster](redis-cluster.png)
+
+2. 数据类型
+
+   Redis为C语言开发，针对其支持的几种类型作了底层数据结构的优化，以保证对各数据类型操作的搞性能。几种基础数据类型的底层数据结构对应关系如下：
+
+   - String：String类型的内部编码有3种：int、raw和embstr，其中int用于保存整型int和长整型long，后两者为redis定义的简单动态字符串结构（SDS），用于保存字符串类型，浮点数在底层被转换为字符串值，然后再对应到这3种编码规则。
+
+     ![redis-string](./redis-string.webp)
+
+     ![redis-string-int](./redis-string-int.webp)
+
+     ![redis-string-embstr](./redis-string-embstr.webp)
+
+     ![redis-string-raw](./redis-string-raw.webp)
+
+   - List：List类型保存数组，可实现简单的消息队列。List类型底层数据结构在3.2版本之前由双向链表或压缩链表实现。之后则统一由quicklist实现。
+
+     ![redis-string](./redis-list.webp)
+
+     ![redis-list-linklist](./redis-list-linklist.png)
+
+     ![redis-list-quicklist](./redis-list-quicklist.png)
+
+   - Hash：Hash类型是一个键值对集合，其底层数据结构是由压缩列表或哈希表(字典)实现的。在7.0版本之后压缩列表已经废弃，交由listpack数据结构实现。
+
+     ![redis-hash](redis-hash.webp)
+
+     ![redis-hash-ziplist](redis-hash-ziplist.png)
+
+     ![redis-hash-dict](redis-hash-dict.jpg)
+
+   - Set：Set类型是一个无序并唯一的键值集合，它的存储顺序不会按照插入的先后顺序进行存储，其底层数据结构是由哈希表或整数集合实现的。
+
+     ![redis-set](redis-set.webp)
+
+     ![redis-set-intset ](redis-set-intset .png)
+
+   - ZSet： ZSet类型相比于Set类型多了一个排序属性score(分值)，对于有序集合 ZSet 来说，每个存储元素相当于有两个值组成的，一个是有序结合的元素值，一个是排序值。其底层数据结构是由压缩列表或跳表实现的。在7.0版本之后压缩列表已经废弃，交由listpack数据结构实现。
+
+     ![redis-zset](redis-zset.webp)
+
+     ![redis-zset-skiplist](redis-zset-skiplist.png)
+
+     ![redis-zset-listpack](redis-zset-listpack.png)
+
+   - Bitmap：Bitmap类型即位图类型，是一串连续的二进制数组（0和1），可以通过偏移量（offset）定位元素。Bitmap通过最小的单位bit来进行0|1的设置，表示某个元素的值或者状态，时间复杂度为O(1)。Bitmap本身是用String类型作为底层数据结构实现的一种统计二值状态的数据类型。
+
+     ![redis-bitmap](redis-bitmap.png)
+
+   - HyperLogLog：HyperLogLog类型是Redis2.8.9 版本新增的数据类型，是一种用于统计基数的数据集合类型，基数统计就是指统计一个集合中不重复的元素个数。HyperLogLog提供低内存消耗下不精确的去重计数，其统计规则是基于概率完成的，不是非常准确，标准误算率是 0.81%。
+
+     ![redis-hyperloglog](redis-hyperloglog.jpg)
+
+   - GEO：GEO类型是Redis 3.2版本新增的数据类型，主要用于存储地理位置信息，并对存储的信息进行操作。其本身并没有设计新的底层数据结构，而是直接使用了 Sorted Set 集合类型。
+
+   - Stream：Stream类型是Redis 5.0版本新增加的数据类型，是专门为消息队列设计的数据类型。其底层数据结构为RaxTree。Stream 保存的消息数据，按照 key-value 形式来看的话，消息 ID 就相当于 key，而消息内容相当于是 value。也就是说，Stream 会使用 Radix Tree 来保存消息 ID，然后将消息内容保存在 listpack 中，并作为消息 ID 的 value，用 raxNode 的 value 指针指向对应的 listpack。
+
+     ![redis-stream](redis-stream.jpg)
+
+   整体的数据类型与数据结构对应关系如下：
+
+   ![redis-datastruct](./redis-datastruct.png)
+
+   Redis 五种数据类型的应用场景：
+
+   - String：缓存对象、常规计数、分布式锁、共享session信息等
+   - List：消息队列（有两个问题：1. 生产者需要自行实现全局唯一 ID；2. 不能以消费组形式消费数据）等
+   - Hash：缓存对象、购物车等
+   - Set：聚合计算（并集、交集、差集）场景，比如点赞、共同关注、抽奖活动等
+   - Zset：排序场景，比如排行榜、电话和姓名排序等
+
+   Redis 后续版本又支持四种数据类型，它们的应用场景如下：
+
+   - BitMap（2.2 版新增）：二值状态统计的场景，比如签到、判断用户登陆状态、连续签到用户总数等
+   - HyperLogLog（2.8 版新增）：海量数据基数统计的场景，比如百万级网页 UV 计数等
+   - GEO（3.2 版新增）：存储地理位置信息的场景，比如滴滴叫车
+   - Stream（5.0 版新增）：消息队列，相比于基于 List 类型实现的消息队列，有这两个特有的特性：自动生成全局唯一消息ID，支持以消费组形式消费数据
+
+   针对 Redis 是否适合做消息队列，关键看你的业务场景：
+
+   - 如果你的业务场景足够简单，对于数据丢失不敏感，而且消息积压概率比较小的情况下，把 Redis 当作队列是完全可以的
+   - 如果你的业务有海量消息，消息积压的概率比较大，并且不能接受数据丢失，那么还是用专业的消息队列中间件吧
+
+3. 持久化
+
+   - RDB
+
+     在Redis中生成RDB快照的方式有两种，一种是使用save指令，另一种是bgsave指令，但是底层实现上，其调用的是同一个函数，叫rdbsave，只是其调用的方式不同而已。save指令生成RDB快照过程中会阻塞Redis主进程，直至快照文件生成，而bgsave指令会fork出一个子进程，由fork出来的子进程调用rdbsave，父进程会继续响应来自客户端的读写请求，子进程完成RDB文件生成之后会给父进程发送信号，通知父进程保存完成。
+
+     RDB支持灵活的备份配置策略，非常适合作冷备份，且数据恢复速度快。但如果内存数据量太大，使用RDB进行备份可能会占用大量服务器资源，也可能会发生很多的也异常中断，造成整个Redis停止响应几百毫秒，此外其备份时间长，存在备份过程中断电而备份失败的风险，也无法对备份过程中新增的数据进行备份。
+
+     ![redis-rdb](redis-rdb.jpg)
+
+   - AOF
+
+     AOF备份的是Redis指令(也称为AOF日志)，Redis不断将写指令以特定的协议格式记录到AOF文件在内存的写缓冲区aof_buf中，Redis进程中的ServerCron函数会定期调用flushAppendOnlyFile函数，该函数会调用write函数将aof_buf中的数据写入os cache中，而操作系统会根据自身策略，调用fsync或sdatasync将os cache中的数据写入磁盘。
+
+     AOF支持always、everysec和no三种落盘策略，always策略下每个命令都会写入aof_buff并同步到磁盘，everysec策略下每秒钟回同步一次数据到磁盘，no策略下则不关心落盘事件，而是完全交由操作系统决定。
+
+     AOF由于记录的是每个写操作的指令，因此文件会较大，且越来越大，为应对此问题，Redis新增了重写机制，当AOF文件的大小超过所设定的阈值时，Redis就会启动AOF文件的内容压缩，只保留可以恢复数据的最小指令集。可以使用命令 bgrewriteaof 来重写。AOF 文件重写并不是对原文件进行重新整理，而是直接读取服务器现有的键值对，然后用一条命令去代替之前记录这个键值对的多条命令，生成一个新的文件后去替换原来的 AOF 文件，重写操作也是fork子进程异步执行的。
+
+     ![redis-aof-rewrite](redis-aof-rewrite.png)
+
+     AOF能够频繁地进行数据备份，最大限度避免数据丢失，且可灵活调整备份频率，对Redis性能影响小，但此方式备份文件较大，且恢复过程较RDB慢不少。
+
+     ![redis-aof](redis-aof.png)
+
+   - RDB+AOF
+
+     在Redis4.0之后，Redis新增了RDB-AOF混合持久化方式，这种方式结合了RDB和AOF的优点，既能快速加载又能避免丢失过多的数据，通过设置aof-use-rdb-preamble为yes后即可开启，当开启混合持久化时，主进程先fork出子进程将现有内存副本全量以RDB方式写入AOF文件中，然后将缓冲区中的增量命令以AOF方式写入AOF文件中，写入完成后通知主进程更新相关信息，并将新的含有 RDB和AOF两种格式的AOF文件替换旧的AOF文件。简单来说：混合持久化方式产生的文件一部分是RDB格式，一部分是AOF格式，这种方式无法兼容Redis4.0之前版本的备份文件。
+
+#### 配置文件
+
+#### 运维命令
+
+#### 常用API
+
+#### 相关工具
+
+#### 文章推荐
+
+- [一致性哈希与哈希槽对比](https://www.jianshu.com/p/4163916a2a8a)
+- [Redis数据结构-简单动态字符串SDS](https://www.cnblogs.com/hunternet/p/9957913.html)
+- [Redis数据结构-压缩列表](https://www.cnblogs.com/hunternet/p/11306690.html)
+- [Redis数据结构-链表](https://www.cnblogs.com/hunternet/p/9967279.html)
+- [Redis数据结构-字典](https://www.cnblogs.com/hunternet/p/9989771.html)
+- [Redis数据结构-quicklist](https://www.cnblogs.com/hunternet/p/12624691.html)
+- [Redis数据结构-整数集合](https://www.cnblogs.com/hunternet/p/11268067.html)
+- [Redis数据结构-跳表](https://www.cnblogs.com/hunternet/p/11248192.html)
+- [Redis对象-HyperLogLog](https://mp.weixin.qq.com/s/AvPoG8ZZM8v9lKLyuSYnHQ)
+- [Redis基础-剖析基础数据结构及其用法](https://www.cnblogs.com/detectiveHLH/p/13852896.html)
+- [Redis基础-了解Redis是如何做数据持久化的](https://www.cnblogs.com/detectiveHLH/p/13952320.html)
+- [跟随杠精的视角一起来了解Redis的主从复制](https://www.cnblogs.com/detectiveHLH/p/14066562.html)
+- [Redis Sentinel-深入浅出原理和实践](https://www.cnblogs.com/detectiveHLH/p/14107016.html)
+- [深度图解Redis Cluster原理](https://www.cnblogs.com/detectiveHLH/p/14154665.html)
+- [细说Redis九种数据类型和应用场景](https://www.cnblogs.com/xiaolincoding/p/16370783.html)
+
+#### 排障经验
+
 ### MySQL
 
 ### PostgreSQL
