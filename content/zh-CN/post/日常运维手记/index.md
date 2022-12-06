@@ -1804,7 +1804,7 @@ server.3=slave02:2888:3888
    zkServer.sh status
    ```
 
-3. 交互式连接
+3. 交互模式
 
    ```bash
    zkCli.sh -server localhost:2181 << EOF
@@ -3705,6 +3705,10 @@ server.3=slave02:2888:3888
 
 ### Prometheus
 
+### Grafana
+
+### Loki
+
 ### Redis
 
 **基于内存的KV数据库**
@@ -3884,10 +3888,764 @@ server.3=slave02:2888:3888
    - RDB+AOF
 
      在Redis4.0之后，Redis新增了RDB-AOF混合持久化方式，这种方式结合了RDB和AOF的优点，既能快速加载又能避免丢失过多的数据，通过设置aof-use-rdb-preamble为yes后即可开启，当开启混合持久化时，主进程先fork出子进程将现有内存副本全量以RDB方式写入AOF文件中，然后将缓冲区中的增量命令以AOF方式写入AOF文件中，写入完成后通知主进程更新相关信息，并将新的含有 RDB和AOF两种格式的AOF文件替换旧的AOF文件。简单来说：混合持久化方式产生的文件一部分是RDB格式，一部分是AOF格式，这种方式无法兼容Redis4.0之前版本的备份文件。
+     
+   - 持久化总结
+   
+     redis提供几种持久化机制：
+   
+      a). RDB持久化
+   
+      工作方式 ：根据时间的间隔将redis中数据快照（dump）到dump.rdb文件
+   
+      优势 ：备份恢复简单。RDB通过子进程完成持久化工作，相对比AOF启动效率高
+   
+      劣势 ：服务器故障会丢失几分钟内的数据
+   
+      b). AOF持久化
+   
+      工作方式 ：以日志的形式记录所有更新操作到AOF日志文件，在redis服务重新启动时会读取该日志文 件来重新构建数据库，以保证启动后数据完整性。
+   
+      优势 ：AOF提供两种同步机制，一个是fsync always每次有数据变化就同步到日志文件和fsync everysec每秒同步一次到日志文件，最大限度保证数据完整性。
+   
+      劣势：日志文件相对RDB快照文件要大的多
+   
+      AOF日志重写功能 ：AOF日志文件过大，redis会自动重写AOF日志，append模式不断的将更新记录写入到老日志文件中，同时redis还会创建一个新的日志文件用于追加后续的记录。
+   
+      c). 同时应用AOF和RDB
+   
+      对于数据安全性高的场景，可同时使用AOF和RDB，这样会降低性能。
+   
+      d). 无持久化
+   
+      禁用redis服务持久化功能。
+   
+4. 发布订阅与stream
+
+   **发布订阅**
+
+   Redis能够通过List列表数据类型配合lpush和rpop操作实现消息队列，但是却很难执行消息多播功能，为此Redis单独添加了发布订阅模块实现消息队列的多播。
+
+   在发布订阅模式中，Redis引入频道channel的概念关联生产者和消费者，消费者除了可以订阅频道channel外，还可以通过模式匹配pattern一次性订阅多个频道，这两种订阅方式分别称为频道订阅和模式订阅。生产者向频道发送的消息同时也会被发送到该频道匹配的模式中。
+
+   ![redis-pubsub-channel](redis-pubsub-channel.png)
+
+   ![redis-pubsub-pattern](redis-pubsub-pattern.png)
+
+   订阅频道的原理是Redis服务端在内存中维护着一个**pubsub_channels**频道的字典，字典中key为频道的名称，耳每个value都是一个包含订阅了该频道的消费者的链表。
+
+   ![redis-pubsub-channel-struct](redis-pubsub-channel-struct.png)
+
+   订阅模式的原理是Redis服务端同时在内存中维护一个**pubsub_patterns**模式的链表，链表中每一项都是一个客户端和模式的组合。
+
+   ![redis-pubsub-pattern-struct](redis-pubsub-pattern-struct.png)
+
+   Redis的发布订阅机制虽然满足多播消息队列的需求，但其缺点也很明显，它没有ack机制，无法确保消息的正确发送和接收，且消息一旦消费失败就不能再次被消费，不能保证数据连续性，此外，发布订阅机制中的消息队列不会持久化到磁盘，一旦Redis故障消息都将丢失。
+
+   **Stream**
+
+   为了解决发布订阅机制存在的问题，Redis推出了更为强大的Stream数据类型。Redis Stream从概念上来说，就像是一个 仅追加内容的 消息链表，把所有加入的消息都一个一个串起来，每个消息都有一个唯一的 ID 和内容，这很简单，让它复杂的是从 Kafka 借鉴的另一种概念：消费者组(Consumer Group)(思路一致，实现不同)：
+
+   [![img](https://upload-images.jianshu.io/upload_images/7896890-b9d8afde068a165f.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240)](https://upload-images.jianshu.io/upload_images/7896890-b9d8afde068a165f.png?imageMogr2/auto-orient/strip|imageView2/2/w/1240)
+
+   这是一个典型的 Stream结构。每个 Stream 都有唯一的名称，它就是 Redis 的`key`，在我们首次使用`xadd`指令追加消息时自动创建。Stream相关概念解释如下：
+
+   - Consumer Group：消费者组，可以简单看成记录流状态的一种数据结构。消费者既可以选择使用`XREAD`命令进行 独立消费，也可以多个消费者同时加入一个消费者组进行组内消费。同一个消费者组内的消费者共享所有的Stream信息，同一条消息只会有一个消费者消费到，这样就可以应用在分布式的应用场景中来保证消息的唯一性。
+   - last_delivered_id：用来表示消费者组消费在Stream  消费位置的游标信息。每个消费者组都有一个Stream内唯一的名称，消费者组不会自动创建，需要使用`XGROUP CREATE`指令来显式创建，并且需要指定从哪一个消息 ID 开始消费，用来初始化`last_delivered_id`这个变量。
+   - pending_ids：每个消费者内部都有的一个状态变量，用来表示已经被客户端获取，但是还没有 ack的消息。记录的目的是为了保证客户端至少消费了消息一次，而不会在网络传输的中途丢失而没有对消息进行处理。如果客户端没有 ack，那么这个变量里面的消息 ID 就会越来越多，一旦某个消息被 ack，它就会对应开始减少。这个变量也被 Redis 官方称为PEL(Pending Entries List)。
 
 #### 配置文件
 
+- **/etc/redis.conf**: Redis主配置文件
+
+  ```properties
+  # 是否以后台进程运行
+  daemonize yes 
+  
+  # pid文件位置
+  pidfile /var/run/redis/redis-server.pid    
+  
+  # 监听端口
+  port 6379
+  
+  # 绑定地址，如需远程连接，设置0.0.0.0
+  bind 127.0.0.1   
+  
+  # 连接超时时间，单位秒
+  timeout 300 
+  
+  # 设置redis公开哪个IP给访问者(在nat网络环境下使用)
+  cluster-announce-ip "192.168.0.8"
+  
+  # 日志级别，分别有：
+  # debug ：适用于开发和测试
+  # verbose ：更详细信息
+  # notice ：适用于生产环境
+  # warning ：只记录警告或错误信息
+  loglevel notice  
+  
+  # 日志文件位置
+  logfile /var/log/redis/redis-server.log   
+  
+  # 是否将日志输出到系统日志
+  syslog-enabled no    
+  
+  #设置数据库数量，默认数据库为0
+  databases 16
+  
+  ############### RDB持久化 ###############
+  
+  # 在900s（15m）之后，至少有1个key发生变化，则快照
+  save 900 1    
+  
+  # 在300s（5m）之后，至少有10个key发生变化，则快照
+  save 300 10   
+  
+  # 在60s（1m）之后，至少有1000个key发生变化，则快照
+  save 60 10000  
+  
+  # dump时是否压缩数据
+  rdbcompression yes   
+  
+  # 本地数据库的磁盘中的文件名
+  dbfilename dump.rdb
+  
+  # 数据库(dump.rdb)文件存放目录
+  dir /var/lib/redis  
+  
+  # 从版本RDB版本5开始，一个CRC64的校验就被放在了文件末尾。
+  # 这会让格式更加耐攻击，但是当存储或者加载rbd文件的时候会有一个10%左右的性能下降，  
+  # 所以，为了达到性能的最大化，你可以关掉这个配置项。  
+  # 没有校验的RDB文件会有一个0校验位，来告诉加载代码跳过校验检查。  
+  rdbchecksum yes
+  
+  # 如果配置 yes 当后台持久化失败，Redis会停止接受更新操作。如果持久化进程再次工作则会恢复允许更新操作
+  # 如果配置 no 当后台持久化失败，Redis更新操作仍然继续处理
+  stop-writes-on-bgsave-error yes
+  
+  ############### AOF持久化 ###############
+  
+  # AOF持久化，是否记录更新操作日志，默认redis是异步(快照)把数据写入本地磁盘
+  appendonly yes   
+  
+  # 指定AOF日志文件名
+  appendfilename appendonly.aof  
+  
+  # AOF持久化三种同步策略：
+  # appendfsync always    #每次有数据发生变化时都会写入appendonly.aof
+  # appendfsync everysec  #默认方式，每秒同步一次到appendonly.aof
+  # appendfsync no        #不同步，数据不会持久化
+  appendfsync everysec
+  
+  # 当AOF日志文件即将增长到指定百分比时，redis通过调用BGREWRITEAOF是否自动重写AOF日志文件
+  no-appendfsync-on-rewrite no
+  
+  # 当AOF文件大小超过上次rewrite后的100%(一倍)并且文件大于64M时触发rewrite
+  auto-aof-rewrite-percentage 100
+  auto-aof-rewrite-min-size 64mb
+  
+  # redis在恢复时忽略最后一条可能存在问题的指令，默认值yes。在aof写入时突然断电可能会出现指令写错(写了一半)，这种情况下yes会log并继续，而no会直接恢复失败
+  aof-load-truncated yes
+  
+  # 是否启用rdb+aof混合持久化
+  aof-use-rdb-preamble no
+  
+  ############### 安全 ###############
+  
+  # 配置redis连接认证密码
+  requirepass foobared
+  
+  # 保护模式是一个避免你在互联网(外网)访问redis的机制，默认开启
+  # 当启用保护模式，而且没有密码时，服务器只接受来自IPv4地址(127.0.0.1)、IPv6地址(::1)或Unix套接字本地连接(没密码+保护模式启动=本地访问)
+  protected-mode yes
+  
+  #将危险的命令重命名或者禁用
+  #例如禁用FLUSHALL
+  rename-command FLUSHALL ""
+  
+  #重命名FLUSHDB，重命名后必须用新命令来操作，否则服务器会报错 unknown command
+  rename-command FLUSHDB  qf69aZbLAX3cf3ednHM3SOlbpH71yEXLAX3cf3e
+  
+  ############### 限制 ###############
+  
+  # 为了防止某个脚本执行时间过长导致Redis无法提供服务(比如陷入死循环),Redis提供了lua-time-limit参数限制脚本的最长运行时间，默认为5秒钟。当脚本运行时间超过这一限制后，Redis将开始接受其他命令但不会执行(以确保脚本的原子性，因为此时脚本并没有被终止),而是会返回"BUSY"错误
+  lua-time-limit 5000
+  
+  # 设置最大连接数，0为不限制
+  maxclients 128
+  
+  # 内存清理策略，如果达到此值，将采取以下动作：
+  # volatile-lru     #默认策略，只对设置过期时间的key进行LRU算法删除
+  # allkeys-lru      #删除不经常使用的key
+  # volatile-random  #随机删除即将过期的key
+  # allkeys-random   #随机删除一个key
+  # volatile-ttl     #删除即将过期的key
+  # noeviction       #不过期，写操作返回报错
+  
+  # 允许使用的最大内存(需要配合maxmemory-policy使用),设置为0表示不限制
+  maxmemory <bytes>
+  
+  # 如果达到maxmemory值，采用此策略
+  maxmemory-policy volatile-lru
+  
+  # 默认随机选择3个key，从中淘汰最不经常用的
+  maxmemory-samples 3   
+  
+  ################ 慢查询 ################
+  
+  # 单位为微秒，当命令执行时间超过该值则会被redis记录为慢查询
+  # 配置为负数则禁用慢查询日志
+  # 配置为0则记录所有命令
+  slowlog-log-slower-than 10000
+  
+  # 设置慢查询日志的长度，如果已满则会删掉最旧的保留最新的
+  # 可以用命令 SLOWLOG RESET 来释放内存
+  slowlog-max-len 128
+  
+  ############### 主从复制 ###############
+  
+  # 主从复制使用，用于本机redis作为slave去连接主redis
+  slaveof <masterip> <masterport>  
+  
+  # 当master设置密码认证，slave用此选项指定master认证密码
+  masterauth <master-password>  
+  
+  # 作为从服务器，默认情况下是只读的(yes),可以修改成no用于写(不建议)
+  slave-read-only yes
+  
+  # 当slave与master之间的连接断开或slave正在与master进行数据同步时，如果有slave请求，当设置为yes时，slave仍然响应请求，此时可能有问题，如果设置no时，slave会返回"SYNC with master in progress"错误信息。但INFO和SLAVEOF命令除外。
+  slave-serve-stale-data yes   
+  
+  # Redis部署为Replication模式后，slave会以预定周期（默认10s）发PING包给master，该配置可以更改这个默认周期
+  repl-ping-slave-period 10
+  
+  # 有2种情况的超时均由该配置指定：1) Bulk transfer I/O timeout; 2) master data or ping response timeout。
+  # 需要特别注意的是：若修改默认值，则用户输入的值必须大于repl-ping-slave-period的配置值，否则在主从链路延时较高时，会频繁timeout。
+  repl-timeout 30
+  
+  # 当配置yes时会禁用NO_DELAY，TCP协议栈会合并小包统一发送，这样可以减少主从节点间的包数量并节省带宽，但会增加数据同步到slave的时间
+  # 当配置no时启用NO_DELAY，TCP协议栈不会延迟小包的发送时机，这样数据同步的延时会减少，会消耗更多带宽
+  # 在带宽充足的情况下建议配置为no，以降低同步时延
+  repl-disable-tcp-nodelay no
+  
+  # 存在多个slave的情况下，当master宕机时Redis seninel将选拔priority值最小的slave提升为master
+  # 如果该配置为 0 则永远不会被sentinel提升为master
+  slave-priority 4
+  
+  ############# Cluster模式 #############
+  
+  # 开启集群模式
+  cluster-enabled yes
+  
+  # 集群的配置文件存放路径
+  cluster-config-file "nodes.conf"
+  
+  # 集群的超时时间
+  cluster-node-timeout 5000
+  
+  ############# Sentinel模式 #############
+  
+  # master数据库的ip与端口号，当master发生变化时sentinel会自动修改该配置
+  # 末尾的2代表执行故障恢复操作前至少需要几个哨兵节点同意，一般设置为N/2+1(N为哨兵总数)
+  sentinel monitor redis-master 192.168.1.51 7000 2
+  
+  # 指定了 Sentinel 认为服务器已经断线所需的毫秒数
+  sentinel down-after-milliseconds redis-master 5000
+  
+  # 等待该配置内的时间后master还没有恢复响应，则sentinel会排除掉故障的实例，一段时间后再探测如果已恢复则把之前故障的master作为slave处理
+  sentinel failover-timeout redis-master 900000
+  
+  # 选项指定了在执行故障转移时， 最多可以有多少个从服务器同时对新的主服务器进行同步， 这个数字越小， 完成故障转移所需的时间就越长。
+  sentinel parallel-syncs redis-master 2
+  
+  # master的访问密码
+  sentinel auth-pass redis-master 123456
+  
+  ############### 虚拟内存 ###############
+  
+  # 是否启用虚拟内存机制，虚拟内存机将数据分页存放，把很少访问的页放到swap上，内存占用多，最好关闭虚拟内存
+  vm-enabled no      
+  
+  # 虚拟内存文件位置
+  vm-swap-file /var/lib/redis/redis.swap   
+  
+  # redis使用的最大内存上限，保护redis不会因过多使用物理内存影响性能
+  vm-max-memory 0    
+  
+  # 每个页面的大小为32字节
+  vm-page-size 32    
+  
+  # 设置swap文件中页面数量
+  vm-pages 134217728  
+  
+  # 访问swap文件的线程数
+  vm-max-threads 4    
+  
+  ############## 缓冲区 ###############
+  
+  # redis为了解决输出缓冲区消息大量堆积的隐患，设置了一些保护机制，主要采用两种限制措施
+  # 大小限制: 当某一客户端缓冲区超过设定值后直接关闭连接；
+  # 持续性限制: 当某一客户端缓冲区持续一段时间占用过大空间时关闭连接。
+  
+  # 缓冲区配置项格式如下：
+  # client-output-buffer-limit <class> <hard limit> <soft limit> <soft seconds>
+  # 具体参数含义如下：
+  # class: 客户端种类，normal、slave、pubsub。
+  # mormal: 普通的客户端
+  # slave: 从库的复制客户端
+  # pub/sub: 发布与订阅的客户端的
+  # hard limit: 缓冲区大小的硬限制。
+  # soft limit: 缓冲区大小的软限制。
+  # soft seconds: 缓冲区大小达到了（超过）soft limit值的持续时间，单位秒。
+  
+  client-output-buffer-limit normal 0 0 0
+  client-output-buffer-limit replica 256mb 64mb 60
+  client-output-buffer-limit pubsub 32mb 8mb 60
+  
+  # master与slave作psync同步时，master会维护一个FIFO复制缓冲区
+  # 复制缓冲区大小
+  repl-backlog-size 1mb
+  
+  # 当master不再与任何slave保持连接时，复制缓冲区可能被清空
+  # repl-backlog-ttl 用于配置从断开连接到清空缓冲区间隔的秒数
+  # 0 表示永不清除缓冲区
+  repl-backlog-ttl 3600
+  
+  ############### 高级配置 ###############
+  
+  # 哈希表中元素（条目）总个数不超过设定数量时，采用线性紧凑格式存储来节省空间
+  hash-max-zipmap-entries 512   
+  
+  # 哈希表中每个value的长度不超过多少字节时，采用线性紧凑格式存储来节省空间
+  hash-max-zipmap-value 64     
+  
+  # list数据类型多少节点以下会采用去指针的紧凑存储格式
+  list-max-ziplist-entries 512  
+  
+  # list数据类型节点值大小小于多少字节会采用紧凑存储格式
+  list-max-ziplist-value 64    
+  
+  # set数据类型内部数据如果全部是数值型，且包含多少节点以下会采用紧凑格式存储
+  set-max-intset-entries 512  
+  
+  # 有序序列也可以用一种特别的编码方式来处理，可节省大量空间。这种编码只适合长度和元素都符合下面限制的有序序列：
+  zset-max-ziplist-entries 128
+  zset-max-ziplist-value 64
+  
+  # 是否激活重置哈希
+  activerehashing yes        
+  ```
+
 #### 运维命令
+
+1. 服务启停
+
+   ```bash
+   # redis服务端启停
+   ./redis-server    # 前台进程，配置daemonize yes后可后台常驻
+   ./redis-server &  # 后台进程
+   ./redis-server --sentinel  # 哨兵模式启动
+   ./redis-server ./redis.conf --daemonize yes --port 1123  # 指定配置文件并后台启动且端口是1123
+   kill $(ps -ef|grep redis-server|grep -v grep|awk '{print $2}') #杀死redis进程
+   ./redis-cli shutdown  # 通过客户端停止服务端
+   # redis客户端
+   ./redis-cli ping                  # 直接执行redis命令
+   ./redis-cli -a 'password' ping    # 密码验证
+   ./redis-cli -h 127.0.0.1 -p 6379  # 进入交互模式
+   ```
+
+2. 交互模式
+
+   ```bash
+   redis-cli <<EOF
+   交互式命令(不区分大小写)
+   EOF
+   
+   # 显示帮助
+   > HELP
+   
+   # 显示命令的帮助
+   > COMMAND                   # 反正所有命令的帮助
+   > COMMAND COUNT             # 返回服务器支持的命令的个数
+   > COMMAND INFO <commands>   # 返回指定命令的帮助
+   
+   # 显示命令参数中的key
+   > COMMAND GETKEYS <command>
+   
+   # 检查到服务端的连接状态
+   > PING
+   
+   # 回显消息
+   > ECHO <message>
+   
+   # 查看当前服务器时间
+   > TIME
+   
+   # 显示当前实例所属角色
+   > ROLE
+   
+   # 调试
+   > DEBUG OBJECT <key>   # 返回key的调试信息
+   > DEBUG SEGFAULT       # 让redis服务崩溃
+   
+   # 关闭redis
+   > SHUTDOWN             # 数据会同步到磁盘
+   
+   # 关闭连接
+   > QUIT
+   
+   # 查看配置
+   > CONFIG GET 配置项名称       # 查看单个配置
+   > CONFIG GET *               # 查看所有配置
+   例: CONFIG GET requirepass   # 获取密码
+   
+   # 更新配置
+   > CONFIG SET 配置项名称 配置项参数值   # 更新配置项
+   > CONFIG REWRITE                     # 配置更新持久化到配置文件
+   > CONFIG RESETSTAT                   # 重置info命令中的某些统计数据
+   例: CONFIG SET requirepass ""        # 取消密码
+   
+   # 显示redis服务器统计信息
+   > INFO [section]      # Server Cluster Clients CPU Memory Stats Persistence Replication
+   
+   # 客户端
+   > CLIENT LIST             # 显示所有客户端连接
+   > CLIENT GETNAME          # 获取连接名称
+   > CLIENT SETNAME <name>   # 设置当前连接名称
+   > CLIENT PAUSE <timeout>  # 在指定时间内终止运行来自客户端的命令
+   > CLIENT KILL <ip:port>   # 关闭指定客户端
+   
+   # 实时打印redis服务端接收的指令
+   > MONITOR
+   
+   # 密码认证
+   > AUTH <passwd>        # 进行密码认证
+   > REQUIREPASS <passwd> # 设置认证密码
+   > MASTERAUTH           # 设置master的认证密码
+   
+   # 慢日志
+   > SLOWLOG RESET        # 重置慢日志记录
+   > SLOWLOG GET <int>    # 查询前N条慢日志内容
+   > SLOWLOG LEN          # 查询慢日志条数
+   
+   # 数据库
+   > SELECT <int>         # 选择编号为N的数据库
+   > DBSIZE               # 查询当前库键总数
+   > KEYS <pattern>       # 查询匹配的所有key
+   > KEYS *               # 查询当前库所有key
+   > EXISTS <key>         # 确认key是否存在
+   > DEL <key>            # 删除一个key
+   > TYPE <key>           # 查看key的值类型
+   > RENAME <key> <newkey># 重命名key
+   > RENAMENX <key> <newkey>  # 被重命名的新名称不存在的时候才有效
+   > MOVE <key> <dbindex> # 将当前库中的key移动到指定库中
+   > RANDOMKEY            # 随机返回一个key
+   > FLUSHDB              # 清空当前库所有key
+   > FLUSHALL             # 清空所有库所有key
+   > DUMP <key>           # 迁出指定key(value采用rdb格式序列化)
+   > RESTORE <key> <ttl> <serialized-value> [replace] # 迁入指定key
+   > MIGRATE <host> <port> <key> [ key ......] <dest-db> <timeout> [replace] # migrate整合数据迁移
+   
+   # 事务
+   > MULTI                # 标记一个事务块的开始
+   > DISCARD              # 取消事务，放弃执行事务块内的所有命令
+   > EXEC                 # 执行所有事务块内的命令
+   > WATCH <keys>         # 监视一个(或多个)key,如果在事务执行之前这个(或这些)key被其他命令所改动，那么事务将被打断
+   > UNWATCH              # 取消WATCH命令对所有key的监视
+   
+   # 脚本
+   > EVAL <script> <numkeys> [keys] [args]         # 执行Lua脚本
+   > EVALSHA <sha1> <numkeys> [keys] [args]        # 执行Lua脚本
+   > SCRIPT EXISTS <scripts>                       # 查看指定的脚本是否已经被保存在缓存当中
+   > SCRIPT FLUSH                                  # 从脚本缓存中移除所有脚本
+   > SCRIPT KILL                                   # 杀死当前正在运行的Lua脚本
+   > SCRIPT LOAD <script>                          # 将脚本添加到脚本缓存中但并不立即执行这个脚本
+   
+   # 持久化
+   > SAVE                 # 将数据以rdb快照方式同步保存到磁盘
+   > BGSAVE               # 将数据以rdb快照方式异步保存到磁盘
+   > LASTSAVE             # 返回上次成功将数据rdb快照保存到磁盘的Unix时间戳
+   > BGREWRITEAOF         # 手动触发aof日志重写
+   
+   # 主备
+   > SLAVEOF              # 将当前实例作为某个示例的slave
+   > SLAVEOF no one       # 将当前实例提升为master
+   
+   # sentinel
+   > INFO                              # 哨兵集群信息
+   > SENTINEL MASTERS                  # 列出所有被监视的主服务器，以及这些主服务器的当前状态
+   > SENTINEL SLAVES <master-name>     # 列出指定主redis的从节点状态情况
+   > SENTINEL SENTINELS <master-name>  # 列出指定主redis的监控哨兵信息，不包含他自己
+   > SENTINEL GET-MASTER-ADDR-BY-NAME <master-name>  # 返回给定名字的主服务器的 IP 地址和端口号
+   > SENTINEL <master-name>            # 重置所有名字和给定模式pattern相匹配的主服务器。重置操作清除主服务器目前的所有状态，包括正在执行中的故障转移，并移除目前已经发现和关联的主服务器的所有从服务器和sentinel
+   > SENTINEL FAILOVER <master-name>   # 当主服务器失效时 在不询问其他sentinel意见的情况下，强制开始一次自动故障迁移，但是它会给其他sentinel发送一个最新的配置，其他sentinel会根据这个配置进行更新
+   > SENTINEL CKQUORUM <master-name>   # 检查当前在线的哨兵节点。如果一共有5个节点，设置4票，但检查后只有3节点在线，那一直无法进行监控切换
+   > SENTINEL REMOVE <master name>     # 取消当前哨兵对某主节点的监控
+   > SENTINEL FLUSHCONFIG              # 将配置强制刷新到本地文件
+   
+   # cluster
+   > CLUSTER INFO         # 查看集群状态数据
+   > CLUSTER NODES        # 查看集群节点信息
+   > CLUSTER FORGET <nodeid>    # 将节点从集群移除
+   > CLUSTER MEET <ip> <port>   # 将节点加入集群
+   > CLUSTER REPLICATE <nodeid> # 将当前节点设置为指定节点的slave节点
+   > CLUSTER SAVECONFIG         # 将节点的配置文件持久化到磁盘 
+   > CLUSTER ADDSLOTS <slots>   # 将一个或多个slot槽指派给当前节点
+   > CLUSTER DELSLOTS <slots>   # 移除一个或多个槽对当前节点的指派
+   > CLUSTER FLUSHSLOTS         # 移除指派给当前节点的所有槽，让当前节点变成一个没有指派任何槽的节点
+   > CLUSTER SETSLOT <slot> node <nodeid> # 将槽指派给指定的节点，如果槽已经指派给另一个节点，那么先让另一个节点删除该槽，然后再进行指派
+   > CLUSTER SETSLOT <slot> MIGRATING <nodeid>  # 将本节点的槽迁移到指定的节点中
+   > CLUSTER SETSLOT <slot> IMPORTING <nodeid>  # 从指定的节点中导入槽到本节点
+   > CLUSTER SETSLOT <slot> STABLE              # 取消对槽的导入或者迁移
+   > CLUSTER KEYSLOT <key>                      # 计算键应该被放置在哪个槽上
+   > CLUSTER COUNTKEYSINSLOT <slot>             # 返回槽目前包含的键值对数量
+   > CLUSTER GETKEYSINSLOT <slot> <count>       # 返回指定槽中指定个数的键
+   
+   # 键值过期
+   > EXPIRE <key> <seconds>                   # 设置key在n秒后过期
+   > PEXPIRE <key> <milliseconds>             # 设置key在n毫秒后过期
+   > EXPIREAT <key> <timestamp>               # 设置key在某个时间戳(精确到秒)之后过期
+   > PEXPIREAT <key> <millisecondsTimestamp>  # 设置key在某个时间戳(精确到毫秒)之后过期
+   > TTL <key>                                # 以秒为单位获取key的剩余时间
+   > PTTL <key>                               # 以毫秒为单位获取key的剩余时间
+   > PERSIST <key>                            # 将有过期时间的key转换为无过期的key
+   
+   # 发布订阅
+   > SUBSCRIBE <channels>                     # 订阅给定的一个或多个频道
+   > PSUBSCRIBE <patterns>                    # 订阅一个或多个符合给定模式的频道
+   > UNSUBSCRIBE <channels>                   # 指示客户端退订给定的频道
+   > PUNSUBSCRIBE <patterns>                  # 指示客户端退订所有给定模式的频道
+   > PUBLISH <channel> <message>              # 将信息发送到指定的频道
+   > PUBSUB CHANNELS <patterns>               # 列出当前的活跃频道
+   > PUBSUB NUMSUB <channels>                 # 返回给定频道的订阅者数量
+   > PUBSUB NUMPAT                            # 返回客户端订阅的所有模式的数量总和
+   ```
+
+3. 数据类型
+
+   ```sh
+   ################## String ##################
+   String(字符串):
+       (1) SET    :是定义值的时候用的
+       (2) GET    :获取键的值时候用的
+       (3) EXISTS :判断键是否存在
+       (4) INCR   :整数+1
+       (5) DECR   :整数减-1
+   127.0.0.1:6379> HELP SET                 #查看SET的用法
+   127.0.0.1:6379> SET name test            #定义一个键名为name,而name对应的值为test
+   OK
+   127.0.0.1:6379> GET name                 #可以换取name这个键的值
+   "test"
+   127.0.0.1:6379> SET name centos          #如果再次定义的话,新的值就会覆盖旧的值,所以同一个名称空间中键不允许重复
+   OK
+   127.0.0.1:6379> GET name
+   "centos"
+   127.0.0.1:6379> APPEND name rhel         #追加新的值到name键中
+   (integer) 10                             #显示了追加后的name键对应值的字符串长度
+   127.0.0.1:6379> GET name
+   "centosrhel"
+   127.0.0.1:6379> STRLEN name              #手动获取name键对应值的字符串长度
+   (integer) 10
+   127.0.0.1:6379> SET count 0              #定义名为count的键,值为0
+   OK
+   127.0.0.1:6379> INCR count               #使count的值加1,执行一次加一次1,你可以多执行几次再看看值,此处就不再重复演示
+   (integer) 1
+   127.0.0.1:6379> DECR count               #使count的值减1,执行一次减一次1,也会达到负数,多执行几次看一下
+   (integer) 2                              #我上面执行了三遍INCR所以执行一次DECR就是2,在执行就是1,在执行就是0
+   127.0.0.1:6379> SET name centos NX       #执行会失败,NX的意思是当键中没有值的时候才会设定键,否则不会设定
+   (nil)
+   127.0.0.1:6379> SET name2 centos XX      #执行会失败,XX的意思就是当键中有值的时候才会设定键,否则不会设定
+   (nil)
+   127.0.0.1:6379> SET name centos XX EX 10 #表示name键有值的时候才会赋值,并且赋值完成后过10秒后自动过期
+   
+   ################## List ##################
+   List(列表):
+       (1) RPUSH  :从右侧添加一个值到列表中
+       (2) LPUSH  :从左侧添加一个值到列表中
+       (3) LPOP   :从左侧逐一删除值
+       (4) RPOP   :从右侧逐一删除值
+       (5) LINDEX :指明索引位置并且获取值
+       (6) LSET   :修改列表中的值
+   127.0.0.1:6379> HELP @list               #查看list数组中的相关帮助
+   127.0.0.1:6379> LPUSH l1 mon             #从左侧生成一个名为l1的列表
+   (integer) 1
+   127.0.0.1:6379> LINDEX l1 0              #查看名为l1的列表,并且指定第一个值的位置
+   "mon"
+   127.0.0.1:6379> LPUSH l1 sun             #从左侧新添加一个值为sun到l1列表中
+   (integer) 2
+   127.0.0.1:6379> LINDEX l1 1              #此时原本在0这个位置的mon位置就会变成了1,因为前面挤了一个sun
+   "mon"
+   127.0.0.1:6379> LINDEX l1 0              #获取的就是sun的值,因为从左侧新添加的,所以第一个必定是新添加的值
+   "sun"
+   127.0.0.1:6379> RPUSH l1 tue             #从右侧新添加一个值为tue到l1列表中
+   (integer) 3
+   127.0.0.1:6379> LINDEX l1 2              #查看到的结果就是tue,因为从左侧添加,则0必定是新添加的值,而从右侧添加,则最后一个值必定是新添加的值
+   "tue"
+   127.0.0.1:6379> LSET l1 1 fri            #修改l1列表中位置在1上的值为fri,那么原本在1上面的mon就会被替换为fri
+   OK
+   127.0.0.1:6379> RPOP l1                  #删除从右侧开始的第一个值,执行后会删除tue
+   "tue"
+   
+   ################## Hash ##################
+   Hash(哈希):
+       (1) HSET     :定义一个hash
+       (2) HGET     :获取键中子键对应的值
+       (3) HDEL     :删除键中子键
+       (4) HKEYS    :获取h1键中所有的子键名称
+       (5) HVALES   :获取h1键中所有子键对应的值
+       (6) HLEN     :获取h1键中拥有的hash个数
+   127.0.0.1:6379> HELP @hash                            #查看Hash数组的相关帮助
+   127.0.0.1:6379> HSET h1 a mon                         #创建一个h1键,定义当中有名为a对应mon的hash
+   (integer) 1
+   127.0.0.1:6379> HGET h1 a                             #获取h1键中a对应的值,定义的时候对应的是什么这里显示就会是什么
+   "mon"
+   127.0.0.1:6379> HSET h1 b tue                         #在h1键中重新添加一个名为b对应tue的hash
+   (integer) 1
+   127.0.0.1:6379> HDEL h1 b                             #删除某一个键下的子键对应的值
+   "tue"
+   127.0.0.1:6379> HKEYS h1                              #能够获取h1键中所有的子键名称
+   1) "a" 
+   127.0.0.1:6379> HVALS h1                              #能够获取h1键中所有的子键对应的值
+   1) "mon"
+   127.0.0.1:6379> HLEN h1                               #获取h1键中拥有的hash个数
+   (integer) 1
+   
+   ################## Set ##################
+   Set(集合):
+       (1) SADD     :创建新的集合
+       (2) SINTER   :求两个集合的交集
+       (3) SUNION   :求两个集合的并集,就是两个集合中都存在的,并且打印出来一份
+       (4) SISMEMBER:判断集合中指定的元素是否存在
+       (5) SPOP     :从集合中随机删除一个元素
+   127.0.0.1:6379> HELP @set                              #查看set数组中的相关帮助
+   127.0.0.1:6379> SADD v1 mon tue wen thu fri sat sun    #创建一个名为v1的集合,并且包含的内容为"mon,tue,wen...sun"
+   (integer) 7
+   127.0.0.1:6379> SADD v2 tue thu day                    #创建一个名为v2的集合,并且包含的内容为"tue,thu,day"
+   (integer) 3
+   127.0.0.1:6379> SINTER v1 v2                           #对比两个集合中是否存在交集
+   1) "thu"                                               #如果两个集合中有相同的值,那么会显示在屏幕上
+   2) "tue"
+   127.0.0.1:6379> SUNION v1 v2                           #对比两个集合中的并集
+   1) "sun"
+   2) "mon"
+   3) "tue"
+   4) "thu"
+   5) "wed"
+   6) "fri"
+   7) "sat"                                               #这个值只在v1中,但是还是打印出来了,就是v1中存在的打印出来
+   8) "day"                                               #这个值只在v2中,但是还是打印出来了,就是v2中存在的也打印出来
+   127.0.0.1:6379> SPOP v1                                #删除并弹出v1中的其中一个值,这个值是随机的
+   "wed"
+   127.0.0.1:6379> SISMEMBER v1 wed                       #判断集合中的wed是否还是一个元素
+   (integer) 0                                            #因为上面SPOP随机在v1中删除了一个元素,所以此时判断则为0
+   
+   ################## ZSet ##################
+   ZSet(有序集合):
+       (1) ZADD     :添加一个有序集合
+       (2) ZCARD    :查看有序集合的元素个数
+       (3) ZRANK    :查看指定元素对应的SCORE号
+       (4) ZRANGE   :按照内置索引显示从"min-max"之间的索引
+   127.0.0.1:6379> HELP @sorted_set                                #查看sorted_set中的相关帮助
+   127.0.0.1:6379> ZADD weekday1 1 mon 2 tue 3 wed                 #添加名为weekday1的集合,值用(1,2,3)来指定SCORE,SCORE后面跟值
+   (integer) 3
+   127.0.0.1:6379> ZCARD weekday1                                  #获取有序集合的元素个数
+   (integer) 3
+   127.0.0.1:6379> ZRANK weekday1 tue                              #查看weekday1中tue元素对应的索引号
+   (integer) 1
+   127.0.0.1:6379> ZRANK weekday1 mon                              #SCORE数字大小决定了你的排序(因为我们有内置索引),如果从1开始定义,那么1对应的mon就会是0
+   (integer) 0
+   127.0.0.1:6379> ZSCORE weekday1 tue                             #根据元素来获取SCORE
+   "2"
+   127.0.0.1:6379> ZRANGE weekday1 0 1                             #显示weekday1中按照内置索引从0到1之间的所有元素
+   0)"mon"
+   1)"tue"
+   ```
+
+4. 持久化管理
+
+   ```bash
+   # AOF日志文件出错后修复方法
+   redis-check-aof --fix appendonly.aof  # --fix参数为修复日志文件，不加则对日志检查
+   
+   # 不重启redis从RDB持久化切换到AOF持久化
+   redis-cli> CONFIG SET appendonly yes      # 启用AOF
+   redis-cli> CONFIG SET save ""         # 关闭RDB
+   ```
+
+5. Cluster集群
+
+   ```bash
+   # 查询cluster集群状态
+   ./redis-cli cluster info
+   
+   cluster_state:ok        # ok: 集群可正常接受查询请求；fail：至少有一个哈希槽未被绑定或集群处于错误状态
+   cluster_slots_assigned:16384  # 已分配到集群节点的哈希槽数量
+   cluster_slots_ok:16384  # 哈希槽状态不是FAIL和PFAIL的数量
+   cluster_slots_pfail:0   # 哈希槽状态是PFAIL的数量(临时错误状态，当前不能和节点交互)
+   cluster_slots_fail:0    # 哈希槽状态是FAIL的数量(错误状态，集群节点无法提供查询服务)
+   cluster_known_nodes:6   # 群中节点数量，包括处于握手状态还没有成为集群正式成员的节点
+   cluster_size:3          # 至少包含一个哈希槽且能够提供服务的master节点数量
+   cluster_current_epoch:6 # 集群本地Current Epoch变量的值
+   cluster_my_epoch:1      # 当前正在使用的节点的Config Epoch值
+   cluster_stats_messages_ping_sent:243      # 通过node-to-node二进制总线发送的消息数量
+   cluster_stats_messages_pong_sent:235
+   cluster_stats_messages_sent:478
+   cluster_stats_messages_ping_received:230  # 通过node-to-node二进制总线接收的消息数量
+   cluster_stats_messages_pong_received:243
+   cluster_stats_messages_meet_received:5
+   cluster_stats_messages_received:478
+   
+   # 查看集群节点信息
+   ./redis-cli cluster nodes
+   
+   ID							IP:PORT			  FLAGS MASTER							 PING-SENT	PONG-RECV CONFIG-EPOCH LINK-STATE SLOT
+   0f972c205a469c25aad28790dfdc43989b5dcca3 127.0.0.1:7003@17003 slave 4e0062198602ae83f8981b1da12b37017ac7d1d0 0 1592989019686 4 connected
+   b6b367d00e42026e0edc0e7725695a1dddc385ed 127.0.0.1:7000@17000 myself,master - 0 1592989017000 1 connected 0-5460
+   
+   ID: 节点ID,是一个40字节的随机字符串，这个值在节点启动的时候创建，并且永远不会改变（除非使用CLUSTER RESET HARD命令）。
+   IP:PORT: 客户端与节点通信使用的地址.
+   FLAGS: 逗号分割的标记位，可能的值有: myself, master, slave, fail?, fail, handshake, noaddr, noflags
+   MASTER: 如果节点是slave，并且已知master节点，则这里列出master节点ID,否则的话这里列出”-“。
+   PING-SENT: 最近一次发送ping的时间，这个时间是一个unix毫秒时间戳，0代表没有发送过.
+   PONG-RECV: 最近一次收到pong的时间，使用unix时间戳表示.
+   CONFIG-EPOCH: 节点的epoch值（or of the current master if the node is a slave）。每当节点发生失败切换时，都会创建一个新的，独特的，递增的epoch。如果多个节点竞争同一个哈希槽时，epoch值更高的节点会抢夺到。
+   LINK-STATE: node-to-node集群总线使用的链接的状态，我们使用这个链接与集群中其他节点进行通信.值可以是 connected 和 disconnected.
+   SLOT: 哈希槽值或者一个哈希槽范围. 从第9个参数开始，后面最多可能有16384个 数(limit never reached)。代表当前节点可以提供服务的所有哈希槽值。如果只是一个值,那就是只有一个槽会被使用。如果是一个范围，这个值表示为起始槽-结束槽，节点将处理包括起始槽和结束槽在内的所有哈希槽。
+   
+   各flags的含义
+   myself: 当前连接的节点.
+   master: 节点是master.
+   slave: 节点是slave.
+   fail?: 节点处于PFAIL 状态。 当前节点无法联系，但逻辑上是可达的 (非 FAIL 状态).
+   fail: 节点处于FAIL 状态. 大部分节点都无法与其取得联系将会将改节点由 PFAIL 状态升级至FAIL状态。
+   handshake: 还未取得信任的节点，当前正在与其进行握手.
+   noaddr: 没有地址的节点（No address known for this node）.
+   noflags: 连个标记都没有（No flags at all）
+   ```
+
+6. 性能测试
+
+   ```sh
+   # redis性能测试是通过同时执行多个命令实现的
+   # redis自带redis-benchmark命令用于性能测试，该命令是在redis的目录下执行的，而不是redis客户端的内部指令
+   ./redis-benchmark -n 10000  -q
+   
+   # redis-benchmark参数：
+   -h: 指定服务器主机名,默认127.0.0.1
+   -p: 指定服务器端口,默认6379
+   -s: 指定服务器socket
+   -c: 指定并发连接数,默认50
+   -n: 指定请求数,默认10000
+   -d: 以字节的形式指定SET/GET值的数据大小,默认2
+   -k: 是否保持连接,0每次重连接,1保持连接,默认1
+   -r: SET/GET/INCR使用随机key,SADD使用随机值
+   -P: 通过管道传输<numreq>请求,默认1
+   -q: 强制退出redis,仅显示query/sec值
+   -l: 生成循环,永久执行测试
+   -t: 仅运行以逗号分隔的测试命令列表
+   -I: idle模式,仅打开N个idle连接并等待
+   --csv: 以csv格式输出
+   ```
+
 
 #### 常用API
 
@@ -3910,6 +4668,8 @@ server.3=slave02:2888:3888
 - [Redis Sentinel-深入浅出原理和实践](https://www.cnblogs.com/detectiveHLH/p/14107016.html)
 - [深度图解Redis Cluster原理](https://www.cnblogs.com/detectiveHLH/p/14154665.html)
 - [细说Redis九种数据类型和应用场景](https://www.cnblogs.com/xiaolincoding/p/16370783.html)
+- [Redis发布/订阅与Stream](https://www.cnblogs.com/wmyskxz/p/12499532.html)
+- [Redis Cluster集群扩容缩容原理及实战](https://cloud.tencent.com/developer/article/1604780)
 
 #### 排障经验
 
