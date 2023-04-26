@@ -3709,6 +3709,316 @@ server.3=slave02:2888:3888
 
 ### Loki
 
+### Keepalived
+
+**轻量级LVS服务高可用方案**
+
+#### 基本概念
+
+- **LVS**: Linux Virtual Server(Linux 虚拟服务器), 是一个虚拟的服务器集群技术, 通过多种负载均衡模式实现高可用服务器集群. 该技术已加入Linux内核, IPVS是该技术的具体实现模块。
+- **HA**: High Available (高可用), 表示服务器集群具备比单服务器更高的冗余能力. 高可用集群是由一台主服务器(Master)和一台或多台备用服务器(Backup)组成(均为集群中的节点)。在主节点能够正常运转时，由主节点提供具体服务，其余备用节点处于待机状态，不参与提供服务。
+- **Failover**: 失败切换, 当主节点出现故障无法运转时，此时备用节点会根据特定的约定选择一台备用节点充当主服务器, 替代原来的主节点提供服务。
+- **Split-Brain**: 脑裂, 高可用系统中, 当两个节点之间的联系中断(心跳中断)时, 本来为一个整体、动作协调的HA系统，就分裂成为两个独立的节点(即两个独立的个体)。由于相互失去了联系，都以为是对方出了故障，此时备用节点会运转起来争做主节点的工作，而主节点依然保持着工作，两个服务的同时运转导致整个系统的紊乱. 脑裂可以发生在集群的若干个节点或区域之间, 需要通过增加冗余心跳或者第三方仲裁等方式避免。
+- **VIP**: Virtual IP(虚拟IP), 高可用系统中, 对外提供服务的节点可能因为主节点的故障而发生切换, 为了避免因主节点的切换导致的对外服务IP地址的变化, 通常会在集群内配置一个虚拟IP, 虚拟IP不与特定的计算机或网络接口卡(NIC)相对应, 但可以在集群的各个节点之间飘动, VIP会被配置在当前的主节点的网络接口卡上, 这是由ARP协议的原理决定的, Linux内核对此提供了支持。
+- **VRRP**: Virtual Router Redundancy Protocol(虚拟路由冗余协议), 是为了避免路由器出现单点故障的一种容错协议, 本为路由器而设计, 多个运行着VRRP协议的路由器抽象成一个虚拟路由器(从外边来看，就像只有一个真实的路由器在工作)，组成虚拟路由器的一组路由器会有一个会成为Master路由器，其余的会成为Backup路由器。正常情况下，会由Master完成该虚拟路由器的工作。Master一旦出现故障，从Backup中选出一个成为Master继续工作，从而避免路由器单点问题。
+- **VRID**: Virtual Router ID(虚拟路由标识符), 采用VRRP协议的每一个路由组都可以指定一个VRID用于唯一标识一个虚拟路由器, 拥有相同VRID的同一局域网络的真实路由器自动被划分到一个虚拟路由器, 虚拟路由器以虚拟Mac地址对外提供mac地址发现。
+- **Priority**: 优先级, 用来标识虚拟路由器中各成员路由器的优先级。虚拟路由器根据优先级选举出Master和Backup。
+- **Weight**: 权重, 虚拟路由器中各成员路由器会因为各自监控状态检测的结果在原优先级的基础上增减权重来调整各自的优先级。
+- **Keepalived**: Keepalived一个基于VRRP协议来实现的LVS服务高可用方案，可以利用其来解决单点故障。一个LVS服务会有2台服务器运行Keepalived，一台为主服务器（MASTER），一台为备份服务器（BACKUP），但是对外表现为一个虚拟IP，主服务器会发送特定的消息给备份服务器，当备份服务器收不到这个消息的时候，即主服务器宕机的时候， 备份服务器就会接管虚拟IP，继续提供服务，从而保证了高可用性。
+- **DirectorServer**: 调度服务器, 在LVS集群中充当负载均衡节点, 分为Master节点和Backup节点, VIP会在调度服务器之前飘动, 客户端向调度服务器发起请求, 调度服务器根据负载均衡配置将请求负载到后端的RealServer(真实服务器)上, LVS支持四层负载(IPVS)和七层负载(KTCPVS), 但七层负载模式还很不完善, 基本上都使用其四层负载能力. Keepalived就是使用LVS技术进行高可用调度。
+- **RealServer**: 真实服务器, 基于LVS的Keepalived只是将VIP飘动到Master调度服务器上, 然后将到达Master调度服务器的请求路由转发到真正提供服务的后端服务器, 通常来说Keepalived高可用集群中, RealServer不需要作额外配置, 但如果DirectorServer使用的四层转发模式为DR模式时, 由于需要RealServer之间与Client通信, 因此需要作额外的网络配置. 
+
+#### 架构特性
+
+1. 集群架构
+
+   基于Keepalived的高可用集群存在两种模式:
+
+   - DirectorServer与RealServer分离: 这种模式下, DirectorServer运行Keepalived并配置负载均衡, VIP在DirectorServer间浮动, 客户端请求DirectorServer并由DirectorServer根据负载均衡配置将请求负载到后端的RealServer上, RealServer上运行真正对外提供服务的应用
+   - DirectorServer与RealServer合并: 这种模式下, DirectorServer和RealServer是统一的, Keepalived和真正对外提供服务的应用均运行在同一台服务器上, 接收到客户端请求后, 不需要作负载均衡
+
+   **DirectorServer与RealServer分离**
+
+   ![keepalived-arch](keepalived-arch.png)
+
+   **DirectorServer与RealServer合并**
+
+   ![keepalived-arch1](keepalived-arch1.png)
+
+2. 组件构成
+
+   Keepalived启动后以后会有一个主进程Core，它还会生成另外2个子进程，一个是VRRP Stack负责VRRP协议的实现、一个是Checkers负责IPVS的后端的应用服务器的健康检查，当检测失败就会调用IPVS规则删除后端服务器的IP地址，检测成功了再加回来。当检测后端有失败的情况可以使用SMTP通知管理员。另外VRRP如果检测到另外一个Keepalive失败也可以通过SMTP通知管理员。
+
+   Control Plane：这个就是主进程，主进程的功能是分析配置文件，读取、配置和生效配置文件，指挥那2个子进程工作。
+
+   WatchDog：看门狗，这个是Linux系统内核的一个模块，它的作用是帮助主进程盯着那2个子进程，因为主进程并不负责具体工作，具体工作都是子进程完成的。如果子进程挂了，那Keepalived就不完整了，所以那2个子进程会定期的向主进程打开的一个内部Unix Socket文件写心跳信息。如果有某个子进程不写信息了，它就会重启子进程，主进程就是让WatchDog来监控子进程的。
+
+   Keepalived主要的模块:
+
+   - core模块为keepalived的核心，负责主进程的启动、维护、以及全局配置文件的加载和解析
+   - check模块负责健康检查，包括常见的各种检查方式
+   - vrrp模块是来实现VRRP协议的
+
+   ![keepalived](keepalived.png)
+
+   - WatchDog 监控 checkers 和 VRRP 进程的状况。
+   - Checkers 负责真实服务器的健康检查 healthchecking。
+   - VRRP Stack 负责负载均衡器之间的失败切换。
+   - IPVS wrapper 用来发送设定的规则到内核 IPVS 代码。
+   - Netlink Reflector 用来设定 vrrp 的 vip 地址等。
+
+2. 选举策略
+
+   **选举策略**
+
+   首先，每个节点有一个初始优先级，由配置文件中的`priority`配置项指定，MASTER 节点的 priority 应比 BAKCUP 高。运行过程中 keepalived 根据 vrrp_script 的 `weight` 设定，增加或减小节点优先级。规则如下：
+
+   1. weight值为正时,脚本检测成功时”weight”值会加到”priority”上,检测失败时不加
+
+   - 主失败: 主priority < 备priority+weight之和时会切换
+
+   - 主成功: 主priority+weight之和 > 备priority+weight之和时,主依然为主,即不发生切换
+
+   2. weight为负数时,脚本检测成功时”weight”不影响”priority”,检测失败时,Master节点的权值将是“priority“值与“weight”值之差
+
+   - 主失败: 主priotity-abs(weight) < 备priority时会发生切换
+   - 主成功: 主priority > 备priority 不切换
+
+   3. 当两个节点的优先级相同时，以节点发送`VRRP通告`的 IP 作为比较对象，IP较大者为MASTER。
+
+   **priority 和 weight 的设定**
+
+   1. 主从的优先级初始值priority和变化量weight设置非常关键，配错的话会导致无法进行主从切换。比如，当MASTER初始值定得太高，即使script脚本执行失败，也比BACKUP的priority + weight大，就没法进行VIP漂移了。
+2. 所以priority和weight值的设定应遵循: abs(MASTER priority - BAKCUP priority) < abs(weight)。一般情况下，初始值MASTER的priority值应该比较BACKUP大，但不能超过weight的绝对值。 另外，当网络中不支持多播(例如某些云环境)，或者出现网络分区的情况，keepalived BACKUP节点收不到MASTER的VRRP通告，就会出现脑裂(split brain)现象，此时集群中会存在多个MASTER节点。
+
+#### 配置文件
+
+- **/etc/keepalived/keepalived.conf**: keepalived核心配置文件
+
+  ```sh
+  # 全局配置
+  global_defs {
+     # 邮件通知信息
+     notification_email {
+       # 定义收件人
+       acassen@firewall.loc
+     }
+     # 定义发件人
+     notification_email_from Alexandre.Cassen@firewall.loc
+     # SMTP服务器地址
+     smtp_server 192.168.200.1
+     smtp_connect_timeout 30
+     # 路由器标识，主备节点不同，也可以写成每个主机自己的主机名
+     router_id LVS_DEVEL
+     # VRRP的ipv4和ipv6的广播地址，配置了VIP的网卡向这个地址广播来宣告自己的配置信息，下面是默认值
+     vrrp_mcast_group4 224.0.0.18
+     vrrp_mcast_group6 ff02::12
+  }
+  
+  # 定义用于实例执行的脚本内容，比如可以在线降低优先级，用于强制切换
+  vrrp_script nginx_check {
+      script "/etc/keepalived/nginx_check.sh"   #这里通过脚本监测
+      interval 2                                #脚本执行间隔，每2s检测一次
+      weight –5                                 #脚本结果导致的优先级变更，检测失败（脚本返回非0）则优先级 -5
+      fall 2                                    #检测连续2次失败才算确定是真失败。会用weight减少优先级（1-255之间）
+      rise 1                                    #检测1次成功就算成功。但不修改优先级
+  }
+  
+  # 一个vrrp_instance就是定义一个虚拟路由器的，实例名称
+  vrrp_instance VI_1 {
+      # 定义初始状态，可以是MASTER或者BACKUP
+      state MASTER
+      # 工作接口，通告选举使用哪个接口进行
+      interface ens33
+      # 虚拟路由ID，如果是一组虚拟路由就定义一个ID，如果是多组就要定义多个，而且这个虚拟
+      # ID还是虚拟MAC最后一段地址的信息，取值范围0-255
+      virtual_router_id 51
+      # 使用哪个虚拟MAC地址
+      use_vmac XX:XX:XX:XX:XX
+      # 监控本机上的哪个网卡，网卡一旦故障则需要把VIP转移出去
+      track_interface {
+          eth0
+          ens33
+      }
+      # 如果你上面定义了MASTER,这里的优先级就需要定义的比其他的高
+      priority 100
+      # 通告频率，单位为秒
+      advert_int 1
+      # 通信认证机制，避免外部主机加入, 这里是明文认证还有一种是加密认证
+      authentication {
+          auth_type PASS
+          auth_pass 1111
+      }
+      # 设置虚拟VIP地址，一般就设置一个，在LVS中这个就是为LVS主机设置VIP的，这样你就不用自己手动设置了
+      virtual_ipaddress {
+          # IP/掩码 dev 配置在哪个网卡
+          192.168.200.16/24 dev eth1
+          # IP/掩码 dev 配置在哪个网卡的哪个别名上
+          192.168.200.17/24 dev label eth1:1
+      }
+      # 虚拟路由，在需要的情况下可以设置lvs主机 数据包在哪个网卡进来从哪个网卡出去
+      virtual_routes {
+          192.168.110.0/24 dev eth2
+      }
+      # 工作模式，nopreempt表示工作在非抢占模式，默认是抢占模式 preempt
+      nopreempt|preempt
+      # 如果是抢占默认则可以设置等多久再抢占，默认5分钟
+      preempt delay 300
+      # 追踪脚本，通常用于去执行上面的vrrp_script定义的脚本内容
+      track_script {
+  		nginx_check
+      }
+      # 三个指令，如果主机状态变成Master|Backup|Fault之后会去执行的通知脚本，脚本要自己写
+      notify_master ""
+      notify_backup ""
+      notify_fault ""
+  }
+  
+  # 定义LVS集群服务，可以是IP+PORT；也可以是fwmark 数字，也就是防火墙规则
+  # 所以通过这里就可以看出来keepalive天生就是为ipvs而设计的
+  virtual_server 10.10.10.2 1358 {
+      delay_loop 6
+      # 负载均衡算法
+      lb_algo rr|wrr|lc|wlc|lblc|sh|dh 
+      # LVS的模式
+      lb_kind NAT|DR|TUN
+      # 子网掩码，这个掩码是VIP的掩码
+      nat_mask 255.255.255.0
+      # 持久连接超时时间
+      persistence_timeout 50
+      # 定义协议
+      protocol TCP
+      # 如果后端应用服务器都不可用，就会定向到那个服务器上
+      sorry_server 192.168.200.200 1358
+  
+      # 后端应用服务器 IP PORT
+      real_server 192.168.200.2 1358 {
+          # 权重
+          weight 1
+          # MSIC_CHECK|SMTP_CHEKC|TCP_CHECK|SSL_GET|HTTP_GET这些都是
+          # 针对应用服务器做健康检查的方法
+          MISC_CHECK {}
+          # 用于检查SMTP服务器的
+          SMTP_CHEKC {}
+  
+          # 如果应用服务器不是WEB服务器，就用TCP_CHECK检查
+          TCP_CHECK {
+            # 向哪一个端口检查，如果不指定默认使用上面定义的端口
+            connect_port <PORT>
+            # 向哪一个IP检测，如果不指定默认使用上面定义的IP地址
+            bindto <IP>
+            # 连接超时时间
+            connect_timeout 3
+          }
+  
+          # 如果对方是HTTPS服务器就用SSL_GET方法去检查，里面配置的内容和HTTP_GET一样
+          SSL_GET {}
+  
+          # 应用服务器UP或者DOWN，就执行那个脚本
+          notify_up "这里写的是路径，如果脚本后有参数，整体路径+参数引起来"
+          notify_down "/PATH/SCRIPTS.sh 参数"
+  
+          # 使用HTTP_GET方法去检查
+          HTTP_GET {
+              # 检测URL
+              url { 
+                # 具体检测哪一个URL
+                path /testurl/test.jsp
+                # 检测内容的哈希值
+                digest 640205b7b0fc66c1ea91c463fac6334d
+                # 除了检测哈希值还可以检测状态码，比如HTTP的200 表示正常，两种方法二选一即可
+                status_code 200
+              }
+              url { 
+                path /testurl2/test.jsp
+                digest 640205b7b0fc66c1ea91c463fac6334d
+              }
+              url { 
+                path /testurl3/test.jsp
+                digest 640205b7b0fc66c1ea91c463fac6334d
+              }
+              # 向哪一个端口检查，如果不指定默认使用上面定义的端口
+              connect_port <PORT>
+              # 向哪一个IP检测，如果不指定默认使用上面定义的IP地址
+              bindto <IP>
+              # 连接超时时间
+              connect_timeout 3
+              # 尝试次数
+              nb_get_retry 3
+              # 每次尝试之间间隔几秒
+              delay_before_retry 3
+          }
+      }
+  
+      real_server 192.168.200.3 1358 {
+          weight 1
+          HTTP_GET {
+              url { 
+                path /testurl/test.jsp
+                digest 640205b7b0fc66c1ea91c463fac6334c
+              }
+              url { 
+                path /testurl2/test.jsp
+                digest 640205b7b0fc66c1ea91c463fac6334c
+              }
+              connect_timeout 3
+              nb_get_retry 3
+              delay_before_retry 3
+          }
+      }
+  }
+  ```
+
+- **/etc/keepalived/nginx_check.sh**: 追踪脚本, 拥有探测服务状态, 修改节点优先级
+
+  ```sh
+  #! /bin/bash
+  #检测nginx是否启动了
+  A=`ps -C nginx -no-header | wc - 1`
+  if [ $A -eq 0];then    #如果nginx没有启动就启动nginx 
+      /usr/local/nginx/sbin/nginx    #通过Nginx的启动脚本来重启nginx
+      sleep 2
+      if [`ps -C nginx --no-header| wc -1` -eq 0 ];then   #如果nginx重启失败，则下面就会停掉keepalived服务，进行VIP转移
+          killall keepalived
+      fi
+  fi
+  ```
+
+#### 运维命令
+
+1. 服务启停
+
+   ```sh
+   # 启动
+   systemctl start keepalived
+   /etc/init.d/keepalived start
+   
+   # 停止
+   systemctl stop keepalived
+   /etc/init.d/keepalived stop
+   
+   # 重启
+   systemctl restart keepalived
+   /etc/init.d/keepalived restart
+   
+   # 状态
+   systemctl status keepalived
+   /etc/init.d/keepalived status
+   ```
+
+#### 常用API
+
+#### 相关工具
+
+#### 文章推荐
+
+- [一文带你了解 LVS 负载均衡集群](https://juejin.cn/post/6966411996589719583)
+- [KeepAlived原理和配置详解](https://blog.csdn.net/Little_fxc/article/details/118575772)
+- [LVS-DR+Keepalived](https://www.cnblogs.com/qfzr2508/p/16061533.html)
+- [keepalived+MySQL实现高可用](https://www.cnblogs.com/lijiaman/p/13430668.html)
+
+#### 排障经验
+
 ### Redis
 
 **基于内存的KV数据库**
