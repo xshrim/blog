@@ -1,4 +1,4 @@
 [submodule "public"]
 	path = public
 	url = https://github.com/xshrim/xshrim.github.io
-	branch = main
+	branch = master

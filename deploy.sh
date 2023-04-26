@@ -14,7 +14,9 @@ hugo # if using a theme, replace with `hugo -t <YOURTHEME>`
 cd public
 
 # 添加更改到 git
+# git init
 git add .
+# git remote add origin https://github.com/xshrim/xshrim.github.io.git
 
 # 提交更改
 msg="rebuilding site $(date)"
@@ -24,4 +26,4 @@ fi
 git commit -m "$msg"
 
 # 推送到远程仓库
-git push origin main 
+git push origin master
